@@ -240,32 +240,27 @@ impl BM25 {
             })
             .collect();
 
-        // Parallel processing of documents for each query term
-        for (term_id, idf) in query_terms {
-            // Calculate scores for this term across all documents in parallel
-            let term_scores: Vec<f64> = (0..self.corpus_size)
-                .into_par_iter()
-                .map(|i| {
-                    if let Some(&tf) = self.doc_freqs[i].get(&term_id) {
+        // Parallel processing: calculate BM25 scores for all documents in parallel
+        scores = (0..self.corpus_size)
+            .into_par_iter()
+            .map(|doc_idx| {
+                let mut doc_score = 0.0;
+
+                // Calculate contribution of each query term to this document
+                for (term_id, idf) in &query_terms {
+                    if let Some(&tf) = self.doc_freqs[doc_idx].get(term_id) {
                         let tf = tf as f64;
-                        let denom = tf + denom_base[i];
+                        let denom = tf + denom_base[doc_idx];
 
                         if denom > 0.0 {
-                            idf * (tf * (self.k1 + 1.0) / denom)
-                        } else {
-                            0.0
+                            doc_score += idf * (tf * (self.k1 + 1.0) / denom);
                         }
-                    } else {
-                        0.0
                     }
-                })
-                .collect();
+                }
 
-            // Add term scores to total scores
-            for (i, term_score) in term_scores.into_iter().enumerate() {
-                scores[i] += term_score;
-            }
-        }
+                doc_score
+            })
+            .collect();
 
         scores
     }
