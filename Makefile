@@ -28,6 +28,9 @@ test-order: ## Run document order tests
 test-performance: ## Run performance tests
 	poetry run python test/performance_test.py
 
+test-score-performance: ## Run get_scores performance tests
+	poetry run python test/score_performance_test.py
+
 format: ## Format code with black and isort
 	poetry run black .
 	poetry run isort .

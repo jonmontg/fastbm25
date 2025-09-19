@@ -1,7 +1,7 @@
 use pyo3::prelude::*;
 use pyo3::types::PyModule;
-use std::collections::HashMap;
 use rayon::prelude::*;
+use std::collections::HashMap;
 
 /// BM25 (Best Matching 25) ranking algorithm implementation.
 ///
@@ -96,7 +96,8 @@ impl BM25 {
         // Extract the three components in correct order
         let mut doc_freqs: Vec<HashMap<u32, u32>> = Vec::with_capacity(document_data.len());
         let mut doc_len: Vec<u32> = Vec::with_capacity(document_data.len());
-        let mut document_frequencies: Vec<HashMap<u32, u32>> = Vec::with_capacity(document_data.len());
+        let mut document_frequencies: Vec<HashMap<u32, u32>> =
+            Vec::with_capacity(document_data.len());
 
         for (_, word_freqs, length, doc_terms) in document_data {
             doc_freqs.push(word_freqs);
@@ -141,7 +142,7 @@ impl BM25 {
 
         for (word, widf) in idf_entries {
             idf_sum += widf;
-            
+
             // Track terms with negative IDF (appear in more than half the documents)
             if widf < 0.0 {
                 negative_idfs.push(word);
@@ -177,6 +178,10 @@ impl BM25 {
 
     /// Calculates BM25 relevance scores for a query against all documents in the corpus.
     ///
+    /// This method uses parallel processing to efficiently calculate scores across all
+    /// documents in the corpus, providing significant performance improvements for
+    /// large corpora and multi-core systems.
+    ///
     /// # Arguments
     ///
     /// * `query` - A vector of term IDs representing the search query
@@ -201,6 +206,13 @@ impl BM25 {
     /// - b = Length normalization parameter
     /// - doc_len = Document length in tokens
     /// - avg_doc_len = Average document length in the corpus
+    ///
+    /// # Performance
+    ///
+    /// The document processing is parallelized using Rayon, which provides:
+    /// - Linear scaling with CPU cores for large corpora
+    /// - Optimal performance for queries with multiple terms
+    /// - Consistent results across different hardware configurations
     #[pyo3(signature = (query))]
     fn get_scores(&self, query: Vec<u32>) -> Vec<f64> {
         // Initialize scores vector with zeros
@@ -213,32 +225,48 @@ impl BM25 {
 
         // Pre-compute the length normalization denominator base for each document
         // This is the k1 * (1 - b + b * (doc_len / avg_doc_len)) part of the formula
-        let denom_base: Vec<f64> = self.doc_len.iter()
+        let denom_base: Vec<f64> = self
+            .doc_len
+            .iter()
             .map(|&dl| self.k1 * (1.0 - self.b + self.b * (dl as f64) / self.avgdl))
             .collect();
 
-        // Calculate BM25 score for each query term
-        for q in query {
-            // Get IDF score for this term (0.0 if term not in corpus)
-            let idf = *self.idf.get(&q).unwrap_or(&0.0);
-            if idf == 0.0 { continue; } // Skip terms not in corpus
+        // Filter query terms that exist in the corpus and get their IDF scores
+        let query_terms: Vec<(u32, f64)> = query
+            .into_iter()
+            .filter_map(|q| {
+                let idf = *self.idf.get(&q)?;
+                if idf != 0.0 { Some((q, idf)) } else { None }
+            })
+            .collect();
 
-            // For each document, calculate the contribution of this term
-            for (i, tf_map) in self.doc_freqs.iter().enumerate() {
-                if let Some(&tf) = tf_map.get(&q) {
-                    let tf = tf as f64; // Term frequency in this document
+        // Parallel processing of documents for each query term
+        for (term_id, idf) in query_terms {
+            // Calculate scores for this term across all documents in parallel
+            let term_scores: Vec<f64> = (0..self.corpus_size)
+                .into_par_iter()
+                .map(|i| {
+                    if let Some(&tf) = self.doc_freqs[i].get(&term_id) {
+                        let tf = tf as f64;
+                        let denom = tf + denom_base[i];
 
-                    // Calculate the full denominator: TF + k1 * (1 - b + b * (doc_len / avg_doc_len))
-                    let denom = tf + denom_base[i];
-
-                    // Add this term's contribution to the document's score
-                    // Formula: IDF * (TF * (k1 + 1)) / (TF + k1 * (1 - b + b * (doc_len / avg_doc_len)))
-                    if denom > 0.0 {
-                        scores[i] += idf * (tf * (self.k1 + 1.0) / denom);
+                        if denom > 0.0 {
+                            idf * (tf * (self.k1 + 1.0) / denom)
+                        } else {
+                            0.0
+                        }
+                    } else {
+                        0.0
                     }
-                }
+                })
+                .collect();
+
+            // Add term scores to total scores
+            for (i, term_score) in term_scores.into_iter().enumerate() {
+                scores[i] += term_score;
             }
         }
+
         scores
     }
 
