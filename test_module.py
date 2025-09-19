@@ -38,23 +38,35 @@ def test_bm25():
 
     # Get scores
     scores = bm25.get_scores([tokenize(word) for word in query])
-    print(f"Scores: {scores}")
+    assert scores == [
+        0.06257709693956749,
+        0.43803967857697246,
+        0.3146862644658826,
+        0.0,
+        0.052447710744313765,
+    ]
 
     # Get top-k indices
     top_indices = bm25.get_top_k_indices([tokenize(word) for word in query], k=3)
-    print(f"Top 3 indices: {top_indices}")
+    assert top_indices == [1, 2, 0]
 
     # Test with different parameters
     bm25_custom = fastbm25.BM25(encoded_corpus, k1=2.0, b=0.8)
     scores_custom = bm25_custom.get_scores([token_to_code[word] for word in query])
-    print(f"Scores with custom params (k1=2.0, b=0.8): {scores_custom}")
+    assert scores_custom == [
+        0.06394940169701416,
+        0.44764581187909913,
+        0.31095775422339583,
+        0.0,
+        0.05182629237056598,
+    ]
 
     # Query with terms not in corpus
     query = ["absent", "terms"]
-    indices = bm25.get_top_k_indices([tokenize(word)  for word in query], k=3)
-    scores =  bm25.get_scores([tokenize(word) for word in query])
-    print(f"Top 3 indices: {indices}")
-    print(f"Scores: {scores}")
+    indices = bm25.get_top_k_indices([tokenize(word) for word in query], k=3)
+    scores = bm25.get_scores([tokenize(word) for word in query])
+    assert indices == []
+    assert scores == [0.0, 0.0, 0.0, 0.0, 0.0]
 
     print("All tests passed!")
 
