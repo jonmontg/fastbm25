@@ -26,13 +26,13 @@ packages = [{include = "fastbm25", from = "python"}]
 
 [tool.poetry.dependencies]
 python = "3.11.13"
-black = "^25.9.0"
-maturin = "^1.9.4"
+black = "23.1.0"
+maturin = "1.9.4"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "7.0"
-isort = "^5.0"
-mypy = "^1.0"
+isort = "5.0"
+mypy = "1.0"
 
 
 [build-system]
