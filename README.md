@@ -52,7 +52,7 @@ That's it! The package is now installed and ready to use.
 ```python
 import fastbm25
 
-# Create a corpus (list of documents, where each document is a list of words)
+# Create a corpus (list of documents, where each document is tokenized).
 corpus = [
     ["hello", "world"],
     ["hello", "python"],
