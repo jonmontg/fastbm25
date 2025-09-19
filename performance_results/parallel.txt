@@ -1,0 +1,52 @@
+=== Testing BM25 Consistency ===
+
+Generating corpus with 100 documents, avg length 20, vocab size 50
+Run 1: top_indices = [88, 69, 15, 31, 43]
+Run 2: top_indices = [88, 69, 15, 31, 43]
+Run 3: top_indices = [88, 69, 15, 31, 43]
+✅ SUCCESS: All runs produce identical results!
+
+=== BM25 Performance Test ===
+
+Testing with 1000 documents, avg length 50, vocab size 200
+Generating corpus with 1000 documents, avg length 50, vocab size 200
+  Testing consistency...
+  Consistency check: ✅ PASS
+  Corpus generation: 0.007s
+  Vocabulary creation: 0.001s
+  Text to numeric conversion: 0.001s
+  BM25 initialization: 0.033s
+  Query scoring: 0.001s
+  Top-k retrieval: 0.001s
+  Total time: 0.042s
+  Non-zero scores: 764/1000
+  Top indices: [346, 183, 638, 335, 631]...
+
+Testing with 5000 documents, avg length 100, vocab size 500
+Generating corpus with 5000 documents, avg length 100, vocab size 500
+  Testing consistency...
+  Consistency check: ✅ PASS
+  Corpus generation: 0.071s
+  Vocabulary creation: 0.006s
+  Text to numeric conversion: 0.014s
+  BM25 initialization: 0.327s
+  Query scoring: 0.004s
+  Top-k retrieval: 0.005s
+  Total time: 0.418s
+  Non-zero scores: 3433/5000
+  Top indices: [14, 3858, 2534, 785, 4355]...
+
+Testing with 10000 documents, avg length 150, vocab size 1000
+Generating corpus with 10000 documents, avg length 150, vocab size 1000
+  Testing consistency...
+  Consistency check: ✅ PASS
+  Corpus generation: 0.211s
+  Vocabulary creation: 0.021s
+  Text to numeric conversion: 0.040s
+  BM25 initialization: 1.016s
+  Query scoring: 0.009s
+  Top-k retrieval: 0.009s
+  Total time: 1.288s
+  Non-zero scores: 5857/10000
+  Top indices: [5816, 5072, 1321, 4732, 6902]...
+

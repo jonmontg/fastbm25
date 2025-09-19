@@ -1,6 +1,7 @@
 use pyo3::prelude::*;
 use pyo3::types::PyModule;
 use std::collections::HashMap;
+use rayon::prelude::*;
 
 /// BM25 (Best Matching 25) ranking algorithm implementation.
 ///
@@ -69,29 +70,46 @@ impl BM25 {
     fn new(corpus: Vec<Vec<u32>>, k1: f64, b: f64) -> Self {
         let corpus_size = corpus.len();
 
-        // Document frequency tracking: term_id -> number of documents containing this term
+        // Parallel processing of documents to build term frequencies and lengths
+        // Use enumerate to preserve document order - critical for maintaining
+        // correct document indices that map back to the original corpus
+        let document_data: Vec<(usize, HashMap<u32, u32>, u32, HashMap<u32, u32>)> = corpus
+            .par_iter()
+            .enumerate()
+            .map(|(doc_idx, document)| {
+                // Count term frequencies within this document
+                let mut word_freqs: HashMap<u32, u32> = HashMap::new();
+                for &word in document {
+                    *word_freqs.entry(word).or_insert(0) += 1;
+                }
+
+                // Create a map of unique terms in this document for document frequency counting
+                let mut doc_terms: HashMap<u32, u32> = HashMap::new();
+                for &word in document {
+                    doc_terms.insert(word, 1); // Just mark presence, not frequency
+                }
+
+                (doc_idx, word_freqs, document.len() as u32, doc_terms)
+            })
+            .collect();
+
+        // Extract the three components in correct order
+        let mut doc_freqs: Vec<HashMap<u32, u32>> = Vec::with_capacity(document_data.len());
+        let mut doc_len: Vec<u32> = Vec::with_capacity(document_data.len());
+        let mut document_frequencies: Vec<HashMap<u32, u32>> = Vec::with_capacity(document_data.len());
+
+        for (_, word_freqs, length, doc_terms) in document_data {
+            doc_freqs.push(word_freqs);
+            doc_len.push(length);
+            document_frequencies.push(doc_terms);
+        }
+
+        // Aggregate document frequencies across all documents
         let mut nd: HashMap<u32, u32> = HashMap::new();
-        // Term frequencies per document: doc_id -> term_id -> frequency
-        let mut doc_freqs: Vec<HashMap<u32, u32>> = Vec::with_capacity(corpus.len());
-        // Document lengths in tokens
-        let mut doc_len: Vec<u32> = Vec::with_capacity(corpus.len());
-
-        // First pass: Build document-level statistics
-        for document in &corpus {
-            // Count term frequencies within this document
-            let mut word_freqs: HashMap<u32, u32> = HashMap::new();
-            for &word in document {
-                *word_freqs.entry(word).or_insert(0) += 1;
-            }
-
-            // Store document length
-            doc_len.push(document.len() as u32);
-
-            // Update document frequency counts (how many docs contain each term)
-            for &word in word_freqs.keys() {
+        for doc_terms in document_frequencies {
+            for (word, _) in doc_terms {
                 *nd.entry(word).or_insert(0) += 1;
             }
-            doc_freqs.push(word_freqs);
         }
 
         // Calculate average document length for length normalization
@@ -102,27 +120,33 @@ impl BM25 {
             0.0
         };
 
-        // Second pass: Compute Inverse Document Frequency (IDF) scores
-        // IDF measures how rare a term is across the corpus
-        let mut idf: HashMap<u32, f64> = HashMap::with_capacity(nd.len());
+        // Parallel computation of IDF scores
+        let n = corpus_size as f64;
+        let idf_entries: Vec<(u32, f64)> = nd
+            .par_iter()
+            .map(|(word, &df_u32)| {
+                let df = df_u32 as f64; // Document frequency (number of docs containing this term)
+
+                // IDF formula: log((N - df + 0.5) / (df + 0.5))
+                // where N = total documents, df = documents containing the term
+                let widf = (n - df + 0.5).ln() - (df + 0.5).ln();
+                (*word, widf)
+            })
+            .collect();
+
+        // Build IDF map and collect statistics
+        let mut idf: HashMap<u32, f64> = HashMap::with_capacity(idf_entries.len());
         let mut idf_sum: f64 = 0.0;
         let mut negative_idfs: Vec<u32> = Vec::new();
-        let n = corpus_size as f64;
 
-        // Calculate IDF for each term using Robertson-Sparck Jones formula
-        for (word, &df_u32) in &nd {
-            let df = df_u32 as f64; // Document frequency (number of docs containing this term)
-
-            // IDF formula: log((N - df + 0.5) / (df + 0.5))
-            // where N = total documents, df = documents containing the term
-            let widf = (n - df + 0.5).ln() - (df + 0.5).ln();
+        for (word, widf) in idf_entries {
             idf_sum += widf;
-
+            
             // Track terms with negative IDF (appear in more than half the documents)
             if widf < 0.0 {
-                negative_idfs.push(*word);
+                negative_idfs.push(word);
             }
-            idf.insert(*word, widf);
+            idf.insert(word, widf);
         }
 
         // Handle negative IDFs by replacing them with a small positive value

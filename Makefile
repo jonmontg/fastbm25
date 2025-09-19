@@ -16,8 +16,17 @@ build: ## Build the package
 build-dev: ## Build the package in development mode
 	poetry run maturin develop
 
-test: ## Run tests
-	poetry run python test_module.py
+test: ## Run all tests
+	poetry run python test_runner.py
+
+test-basic: ## Run basic functionality tests
+	poetry run python test/test_module.py
+
+test-order: ## Run document order tests
+	poetry run python test/order_test.py
+
+test-performance: ## Run performance tests
+	poetry run python test/performance_test.py
 
 format: ## Format code with black and isort
 	poetry run black .
