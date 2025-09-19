@@ -22,9 +22,12 @@ classifiers = [
     "Programming Language :: Rust",
 ]
 
+packages = [{include = "fastbm25", from = "python"}]
+
 [tool.poetry.dependencies]
 python = "3.11.13"
 black = "^25.9.0"
+maturin = "^1.9.4"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "7.0"

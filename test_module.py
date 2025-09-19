@@ -5,6 +5,7 @@ Test script for the fastbm25 module.
 
 import fastbm25
 
+
 def test_bm25():
     """Test the BM25 implementation."""
     print("Testing fastbm25 module...")
@@ -15,7 +16,7 @@ def test_bm25():
         ["hello", "python"],
         ["python", "programming", "language"],
         ["rust", "programming", "language"],
-        ["hello", "rust", "world"]
+        ["hello", "rust", "world"],
     ]
 
     print(f"Corpus: {corpus}")
@@ -42,6 +43,7 @@ def test_bm25():
     print(f"Scores with custom params (k1=2.0, b=0.8): {scores_custom}")
 
     print("All tests passed!")
+
 
 if __name__ == "__main__":
     test_bm25()

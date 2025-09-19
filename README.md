@@ -2,58 +2,50 @@
 
 A high-performance BM25 implementation in Rust with Python bindings.
 
-## Features
-
-- Fast BM25 ranking algorithm implementation
-- Python bindings via PyO3
-- Efficient memory usage
-- Support for custom k1 and b parameters
-
 ## Installation
 
-### Using Poetry (Recommended)
+### Prerequisites
 
-1. Install Poetry: https://python-poetry.org/docs/#installation
-2. Install Rust: https://rustup.rs/
-3. Install dependencies and build:
+1. **Install Poetry**: https://python-poetry.org/docs/#installation
+2. **Install Rust**: This project requires Rust to compile the core implementation
+
+   **Install Rust:**
    ```bash
-   poetry install
+   # Install Rust using rustup (recommended)
+   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+   source ~/.cargo/env
+   
+   # Verify installation
+   rustc --version
+   cargo --version
    ```
 
-### Using pip
+   **Alternative installation methods:**
+   - **macOS**: `brew install rust`
+   - **Windows**: Download from https://rustup.rs/
+   - **Linux**: Use your package manager or rustup
 
-1. Install Rust: https://rustup.rs/
-2. Install maturin: `pip install maturin`
-3. Build and install:
-   ```bash
-   maturin develop
-   ```
+   **Why Rust is required:**
+   - The core BM25 algorithm is implemented in Rust for performance
+   - Maturin compiles the Rust code into a Python extension module
+   - PyO3 creates the Python bindings during compilation
 
-### Using the build script
-
-```bash
-python build.py
-pip install target/wheels/fastbm25-*.whl
-```
-
-### Development with Poetry
+### Quick Start
 
 ```bash
-# Install in development mode
+# Clone the repository
+git clone https://github.com/jonmontg/fastbm25.git
+cd fastbm25
+
+# Install dependencies and build
 poetry install
+poetry run maturin develop
 
 # Run tests
 poetry run python test_module.py
-
-# Build the package
-poetry run maturin build --release
-
-# Format code
-make format
-
-# Run all checks
-make check
 ```
+
+That's it! The package is now installed and ready to use.
 
 ## Usage
 
@@ -90,10 +82,8 @@ print(top_indices)  # [1, 0] (or similar, depending on scores)
 ### Using Poetry (Recommended)
 
 ```bash
-# Install dependencies
+# Install dependencies and build
 poetry install
-
-# Build in development mode
 poetry run maturin develop
 
 # Run tests
@@ -105,7 +95,7 @@ make format
 # Run all checks
 make check
 
-# Build wheel
+# Build release wheel
 poetry run maturin build --release
 ```
 
@@ -119,11 +109,4 @@ make test          # Run tests
 make format        # Format code
 make lint          # Run linting
 make clean         # Clean build artifacts
-```
-
-### Using maturin directly
-
-```bash
-maturin develop
-maturin build --release
 ```

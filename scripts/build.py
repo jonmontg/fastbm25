@@ -4,10 +4,11 @@ Poetry build script for fastbm25.
 This script is designed to work with Poetry's build system.
 """
 
+import os
 import subprocess
 import sys
-import os
 from pathlib import Path
+
 
 def run_command(cmd, description, cwd=None):
     """Run a command and handle errors."""
@@ -29,6 +30,7 @@ def run_command(cmd, description, cwd=None):
         print(f"Output: {result.stdout.strip()}")
     return True
 
+
 def main():
     """Main build function for Poetry."""
     print("Building fastbm25 with Poetry...")
@@ -39,12 +41,18 @@ def main():
     # Check if maturin is available
     if not run_command(["maturin", "--version"], "Checking maturin version"):
         print("Installing maturin...")
-        if not run_command([sys.executable, "-m", "pip", "install", "maturin"], "Installing maturin"):
+        if not run_command(
+            [sys.executable, "-m", "pip", "install", "maturin"], "Installing maturin"
+        ):
             print("Failed to install maturin. Please install it manually.")
             sys.exit(1)
 
     # Build the wheel using maturin
-    if not run_command(["maturin", "build", "--release"], "Building wheel with maturin", cwd=project_root):
+    if not run_command(
+        ["maturin", "build", "--release"],
+        "Building wheel with maturin",
+        cwd=project_root,
+    ):
         print("Build failed!")
         sys.exit(1)
 
@@ -52,6 +60,7 @@ def main():
     print("\nNext steps:")
     print("  poetry install  # Install in development mode")
     print("  poetry build    # Build distribution packages")
+
 
 if __name__ == "__main__":
     main()
