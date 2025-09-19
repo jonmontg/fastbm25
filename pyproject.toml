@@ -2,7 +2,7 @@
 name = "fastbm25"
 version = "0.1.0"
 description = "A fast BM25 implementation in Rust"
-authors = ["Jon Montgomery <jonmontg@example.com>"]
+authors = ["Jon Montgomery <jmontgom543@gmail.com>"]
 readme = "README.md"
 license = "MIT"
 homepage = "https://github.com/jonmontg/fastbm25"

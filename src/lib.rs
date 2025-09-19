@@ -5,16 +5,16 @@ use std::collections::HashMap;
 #[pyclass]
 struct BM25 {
     corpus_size: usize,
-    avgdl: f64, // average characters per document
-    doc_freqs: Vec<HashMap<String, u32>>, // frequency of words in each document
-    idf: HashMap<String, f64>,
+    avgdl: f64, // average tokens per document
+    doc_freqs: Vec<HashMap<u32, u32>>, // frequency of words in each document
+    idf: HashMap<u32, f64>,
     doc_len: Vec<u32>,
     k1: f64,
     b: f64,
 }
 
 impl BM25 {
-    fn scores_for_query(&self, query: &[String]) -> Vec<f64> {
+    fn scores_for_query(&self, query: &[u32]) -> Vec<f64> {
         let mut scores = vec![0.0; self.corpus_size];
         if self.corpus_size == 0 || self.avgdl == 0.0 {
             return scores;
@@ -44,24 +44,24 @@ impl BM25 {
 impl BM25 {
     #[new]
     #[pyo3(signature = (corpus, k1=1.5, b=0.75))]
-    fn new(corpus: Vec<Vec<String>>, k1: f64, b: f64) -> Self {
+    fn new(corpus: Vec<Vec<u32>>, k1: f64, b: f64) -> Self {
         let corpus_size = corpus.len();
 
-        let mut nd: HashMap<String, u32> = HashMap::new(); // word -> num docs with word
-        let mut doc_freqs: Vec<HashMap<String, u32>> = Vec::with_capacity(corpus.len());
+        let mut nd: HashMap<u32, u32> = HashMap::new(); // word -> num docs with word
+        let mut doc_freqs: Vec<HashMap<u32, u32>> = Vec::with_capacity(corpus.len());
         let mut doc_len: Vec<u32> = Vec::with_capacity(corpus.len());
 
         // Build the metadata
-        for document in corpus {
-            let mut word_freqs: HashMap<String, u32> = HashMap::new();
-            for word in &document {
-                *word_freqs.entry(word.clone()).or_insert(0) += 1;
+        for document in &corpus {
+            let mut word_freqs: HashMap<u32, u32> = HashMap::new();
+            for &word in document {
+                *word_freqs.entry(word).or_insert(0) += 1;
             }
 
             doc_len.push(document.len() as u32);
 
-            for word in word_freqs.keys() {
-                *nd.entry(word.clone()).or_insert(0) += 1;
+            for &word in word_freqs.keys() {
+                *nd.entry(word).or_insert(0) += 1;
             }
             doc_freqs.push(word_freqs);
         }
@@ -74,9 +74,9 @@ impl BM25 {
         };
 
         // Build the IDF index
-        let mut idf: HashMap<String, f64> = HashMap::with_capacity(nd.len());
+        let mut idf: HashMap<u32, f64> = HashMap::with_capacity(nd.len());
         let mut idf_sum: f64 = 0.0;
-        let mut negative_idfs: Vec<String> = Vec::new();
+        let mut negative_idfs: Vec<u32> = Vec::new();
         let n = corpus_size as f64;
 
         for (word, &df_u32) in &nd {
@@ -85,9 +85,9 @@ impl BM25 {
             let widf = (n - df + 0.5).ln() - (df + 0.5).ln();
             idf_sum += widf;
             if widf < 0.0 {
-                negative_idfs.push(word.clone());
+                negative_idfs.push(*word);
             }
-            idf.insert(word.clone(), widf);
+            idf.insert(*word, widf);
         }
 
         let average_idf = if !idf.is_empty() {
@@ -114,26 +114,37 @@ impl BM25 {
     }
 
     #[pyo3(signature = (query))]
-    fn get_scores(&self, query: Vec<String>) -> Vec<f64> {
+    fn get_scores(&self, query: Vec<u32>) -> Vec<f64> {
         self.scores_for_query(&query)
     }
 
     #[pyo3(signature = (query, k))]
-    fn get_top_k_indices(&self, query: Vec<String>, k: usize) -> Vec<usize> {
+    fn get_top_k_indices(&self, query: Vec<u32>, k: usize) -> Vec<usize> {
         let scores = self.get_scores(query);
-
-        if self.corpus_size == 0 || k == 0 {
+        let n = scores.len();
+        if n == 0 || k == 0 {
             return Vec::new();
         }
-        let k = k.min(self.corpus_size);
-        let nth = self.corpus_size - k;
+        let k = k.min(n);
 
-        let mut idx: Vec<usize> = (0..self.corpus_size).collect();
+        // Treat NaN as -inf so they never become "top"
+        let key = |x: f64| if x.is_nan() { f64::NEG_INFINITY } else { x };
 
-        idx.select_nth_unstable_by(nth, |&a, &b| scores[a].total_cmp(&scores[b]));
+        // If the highest score is exactly 0.0, return the sentinel indices
+        let max_score = scores.iter().copied().map(key).fold(f64::NEG_INFINITY, f64::max);
+        if max_score == 0.0 {
+            return vec![n; k];  // sentinel: n == self.corpus_size
+        }
+        // (Alternative, a bit more robust: if max_score <= 0.0 && max_score.is_finite() { ... })
+
+        // Normal top-k on indices
+        let nth = n - k;
+        let mut idx: Vec<usize> = (0..n).collect();
+
+        idx.select_nth_unstable_by(nth, |&a, &b| key(scores[a]).total_cmp(&key(scores[b])));
 
         let mut topk = idx.split_off(nth);
-        topk.sort_by(|&a, &b| scores[b].total_cmp(&scores[a]));
+        topk.sort_by(|&a, &b| key(scores[b]).total_cmp(&key(scores[a])));
         topk
     }
 }
