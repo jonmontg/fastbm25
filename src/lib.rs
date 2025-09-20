@@ -1,17 +1,52 @@
-use pyo3::prelude::*;
-use pyo3::types::PyModule;
-use rayon::prelude::*;
-use std::collections::{HashMap, HashSet};
-use std::arch::aarch64::*;
 use nohash_hasher::BuildNoHashHasher;
+use pyo3::prelude::*;
+use pyo3::types::{PyDict, PyModule};
+use rayon::ThreadPoolBuilder;
+use rayon::prelude::*;
+use std::arch::aarch64::*;
+use std::collections::{HashMap, HashSet};
 
 type IntMap = HashMap<u32, u32, BuildNoHashHasher<u32>>;
 type IntSet = HashSet<u32, BuildNoHashHasher<u32>>;
 
+/// Configuration for thread pool settings to optimize performance
+#[pyclass]
+#[derive(Clone)]
+struct ThreadConfig {
+    /// Number of threads to use for parallel processing
+    /// If None, uses the default (number of CPU cores)
+    num_threads: Option<usize>,
+    /// Minimum chunk size for parallel processing
+    /// Smaller chunks may have more overhead but better load balancing
+    min_chunk_size: usize,
+    /// Maximum chunk size for parallel processing
+    /// Larger chunks reduce overhead but may cause load imbalance
+    max_chunk_size: usize,
+}
+
+#[pymethods]
+impl ThreadConfig {
+    #[new]
+    #[pyo3(signature = (num_threads=None, min_chunk_size=1000, max_chunk_size=10000))]
+    fn new(num_threads: Option<usize>, min_chunk_size: usize, max_chunk_size: usize) -> Self {
+        Self {
+            num_threads,
+            min_chunk_size,
+            max_chunk_size,
+        }
+    }
+
+    /// Get the number of threads to use
+    fn get_num_threads(&self) -> usize {
+        self.num_threads
+            .unwrap_or_else(|| rayon::current_num_threads())
+    }
+}
+
 /// ARM64 NEON optimized functions for BM25 computation
 mod neon_utils {
     use super::*;
-    
+
     /// ARM64 NEON optimized vector sum for u32 values
     /// Uses 128-bit vector registers to sum 4 u32 values at once
     #[inline]
@@ -19,7 +54,7 @@ mod neon_utils {
         let mut sum = 0u64;
         let chunks = slice.chunks_exact(4);
         let remainder = chunks.remainder();
-        
+
         for chunk in chunks {
             // Load 4 u32 values into a 128-bit vector register
             let v = unsafe { vld1q_u32(chunk.as_ptr()) };
@@ -27,14 +62,14 @@ mod neon_utils {
             let part: u32 = unsafe { vaddvq_u32(v) };
             sum += part as u64;
         }
-        
+
         // Handle remaining elements
         for &val in remainder {
             sum += val as u64;
         }
         sum
     }
-    
+
     /// ARM64 NEON optimized vector sum for f64 values
     /// Uses 128-bit vector registers to sum 2 f64 values at once
     #[inline]
@@ -62,46 +97,142 @@ mod neon_utils {
             sum
         }
     }
-    
+
     /// ARM64 NEON optimized document length calculation
     /// Processes document lengths in parallel using vector operations
     #[inline]
     pub fn calculate_doc_lengths(documents: &[Vec<u32>]) -> Vec<u32> {
-        const PAR_THRESHOLD: usize = 2_000; // tune for your workload
+        const PAR_THRESHOLD: usize = 1_000; // Lowered threshold for better parallelization
         if documents.len() >= PAR_THRESHOLD {
             documents.par_iter().map(|d| d.len() as u32).collect()
         } else {
             documents.iter().map(|d| d.len() as u32).collect()
         }
     }
-    
+
+    /// Enhanced parallel document length calculation with chunked processing
+    #[inline]
+    pub fn calculate_doc_lengths_chunked(documents: &[Vec<u32>], chunk_size: usize) -> Vec<u32> {
+        if documents.len() < 500 {
+            // For small datasets, use sequential processing
+            documents.iter().map(|d| d.len() as u32).collect()
+        } else {
+            // Use chunked parallel processing for better load balancing
+            documents
+                .par_chunks(chunk_size)
+                .map(|chunk| chunk.iter().map(|d| d.len() as u32).collect::<Vec<u32>>())
+                .flatten()
+                .collect()
+        }
+    }
+
     /// ARM64 NEON optimized term frequency counting with vectorized operations
     #[inline]
     pub fn count_term_frequencies(documents: &[Vec<u32>]) -> Vec<IntMap> {
-        documents
-            .par_iter()
-            .map(|document| {
-                // heuristic: assume ~50% unique; cap to keep allocations reasonable
-                let cap = (document.len().saturating_add(1) / 2).min(16_384);
-                let mut word_freqs: IntMap =
-                    HashMap::with_capacity_and_hasher(cap, BuildNoHashHasher::default());
+        const PAR_THRESHOLD: usize = 500; // Lowered threshold for better parallelization
+        if documents.len() >= PAR_THRESHOLD {
+            documents
+                .par_iter()
+                .map(|document| {
+                    // heuristic: assume ~50% unique; cap to keep allocations reasonable
+                    let cap = (document.len().saturating_add(1) / 2).min(16_384);
+                    let mut word_freqs: IntMap =
+                        HashMap::with_capacity_and_hasher(cap, BuildNoHashHasher::default());
 
-                for &w in document {
-                    // fast path with identity hashing
-                    *word_freqs.entry(w).or_insert(0) += 1;
-                }
-                word_freqs
-            })
-            .collect()
+                    for &w in document {
+                        // fast path with identity hashing
+                        *word_freqs.entry(w).or_insert(0) += 1;
+                    }
+                    word_freqs
+                })
+                .collect()
+        } else {
+            documents
+                .iter()
+                .map(|document| {
+                    let cap = (document.len().saturating_add(1) / 2).min(16_384);
+                    let mut word_freqs: IntMap =
+                        HashMap::with_capacity_and_hasher(cap, BuildNoHashHasher::default());
+
+                    for &w in document {
+                        *word_freqs.entry(w).or_insert(0) += 1;
+                    }
+                    word_freqs
+                })
+                .collect()
+        }
     }
-    
+
+    /// Enhanced parallel term frequency counting with chunked processing
+    #[inline]
+    pub fn count_term_frequencies_chunked(
+        documents: &[Vec<u32>],
+        chunk_size: usize,
+    ) -> Vec<IntMap> {
+        if documents.len() < 200 {
+            // For small datasets, use sequential processing
+            documents
+                .iter()
+                .map(|document| {
+                    let cap = (document.len().saturating_add(1) / 2).min(16_384);
+                    let mut word_freqs: IntMap =
+                        HashMap::with_capacity_and_hasher(cap, BuildNoHashHasher::default());
+
+                    for &w in document {
+                        *word_freqs.entry(w).or_insert(0) += 1;
+                    }
+                    word_freqs
+                })
+                .collect()
+        } else {
+            // Use chunked parallel processing for better load balancing
+            documents
+                .par_chunks(chunk_size)
+                .map(|chunk| {
+                    chunk
+                        .iter()
+                        .map(|document| {
+                            let cap = (document.len().saturating_add(1) / 2).min(16_384);
+                            let mut word_freqs: IntMap = HashMap::with_capacity_and_hasher(
+                                cap,
+                                BuildNoHashHasher::default(),
+                            );
+
+                            for &w in document {
+                                *word_freqs.entry(w).or_insert(0) += 1;
+                            }
+                            word_freqs
+                        })
+                        .collect::<Vec<IntMap>>()
+                })
+                .flatten()
+                .collect()
+        }
+    }
+
     #[inline]
     pub fn extract_unique_terms(documents: &[Vec<u32>]) -> Vec<IntSet> {
-        const PAR_THRESHOLD: usize = 2_000; // tune for your workload
+        const PAR_THRESHOLD: usize = 1_000; // Lowered threshold for better parallelization
         if documents.len() >= PAR_THRESHOLD {
             documents.par_iter().map(unique_set).collect()
         } else {
             documents.iter().map(unique_set).collect()
+        }
+    }
+
+    /// Enhanced parallel unique terms extraction with chunked processing
+    #[inline]
+    pub fn extract_unique_terms_chunked(documents: &[Vec<u32>], chunk_size: usize) -> Vec<IntSet> {
+        if documents.len() < 500 {
+            // For small datasets, use sequential processing
+            documents.iter().map(unique_set).collect()
+        } else {
+            // Use chunked parallel processing for better load balancing
+            documents
+                .par_chunks(chunk_size)
+                .map(|chunk| chunk.iter().map(unique_set).collect::<Vec<IntSet>>())
+                .flatten()
+                .collect()
         }
     }
 
@@ -116,7 +247,6 @@ mod neon_utils {
         set
     }
 }
-
 
 /// BM25 (Best Matching 25) ranking algorithm implementation.
 ///
@@ -154,6 +284,8 @@ struct BM25 {
     k1: f64,
     /// Length normalization parameter (default: 0.75)
     b: f64,
+    /// Thread configuration for parallel processing
+    thread_config: ThreadConfig,
 }
 
 #[pymethods]
@@ -181,17 +313,50 @@ impl BM25 {
     /// This function will not panic, but empty corpora will result in a BM25 instance
     /// that returns zero scores for all queries.
     #[new]
-    #[pyo3(signature = (corpus, k1=1.5, b=0.75))]
-    fn new(corpus: Vec<Vec<u32>>, k1: f64, b: f64) -> Self {
+    #[pyo3(signature = (corpus, k1=1.5, b=0.75, thread_config=None))]
+    fn new(corpus: Vec<Vec<u32>>, k1: f64, b: f64, thread_config: Option<ThreadConfig>) -> Self {
         let corpus_size = corpus.len();
+
+        // Use provided thread config or create default
+        let thread_config = thread_config.unwrap_or_else(|| ThreadConfig::new(None, 1000, 10000));
+
+        // Configure thread pool if custom thread count is specified
+        if let Some(num_threads) = thread_config.num_threads {
+            let _ = ThreadPoolBuilder::new()
+                .num_threads(num_threads)
+                .build_global();
+        }
 
         // Use ARM64 NEON optimized functions for better performance on ARM architectures
         let (doc_freqs, doc_len, document_frequencies) = {
-            // Parallel processing with NEON optimizations
-            let word_freqs = neon_utils::count_term_frequencies(&corpus);
-            let doc_lengths = neon_utils::calculate_doc_lengths(&corpus);
-            let doc_terms = neon_utils::extract_unique_terms(&corpus);
-            
+            // Choose processing strategy based on corpus size
+            let chunk_size = if corpus_size > 10000 {
+                thread_config.max_chunk_size
+            } else if corpus_size > 1000 {
+                thread_config.min_chunk_size
+            } else {
+                corpus_size // No chunking for small corpora
+            };
+
+            // Use chunked parallel processing for large corpora
+            let word_freqs = if corpus_size > 5000 {
+                neon_utils::count_term_frequencies_chunked(&corpus, chunk_size)
+            } else {
+                neon_utils::count_term_frequencies(&corpus)
+            };
+
+            let doc_lengths = if corpus_size > 2000 {
+                neon_utils::calculate_doc_lengths_chunked(&corpus, chunk_size)
+            } else {
+                neon_utils::calculate_doc_lengths(&corpus)
+            };
+
+            let doc_terms = if corpus_size > 2000 {
+                neon_utils::extract_unique_terms_chunked(&corpus, chunk_size)
+            } else {
+                neon_utils::extract_unique_terms(&corpus)
+            };
+
             (word_freqs, doc_lengths, doc_terms)
         };
 
@@ -228,7 +393,7 @@ impl BM25 {
         // Build IDF map and collect statistics
         let mut idf: HashMap<u32, f64> = HashMap::with_capacity(idf_entries.len());
         let mut negative_idfs: Vec<u32> = Vec::new();
-        
+
         // Extract IDF values for vectorized sum calculation
         let idf_values: Vec<f64> = idf_entries.iter().map(|(_, widf)| *widf).collect();
         let idf_sum: f64 = neon_utils::neon_sum_f64_slice(&idf_values);
@@ -264,6 +429,7 @@ impl BM25 {
             doc_len,
             k1,
             b,
+            thread_config,
         }
     }
 
@@ -331,27 +497,62 @@ impl BM25 {
             })
             .collect();
 
-        // Parallel processing: calculate BM25 scores for all documents in parallel
-        scores = (0..self.corpus_size)
-            .into_par_iter()
-            .map(|doc_idx| {
-                let mut doc_score = 0.0;
+        // Enhanced parallel processing: calculate BM25 scores for all documents in parallel
+        // Use chunked processing for very large corpora to improve load balancing
+        let chunk_size = if self.corpus_size > 50000 {
+            self.thread_config.max_chunk_size
+        } else if self.corpus_size > 10000 {
+            self.thread_config.min_chunk_size
+        } else {
+            self.corpus_size // No chunking for smaller corpora
+        };
 
-                // Calculate contribution of each query term to this document
-                for (term_id, idf) in &query_terms {
-                    if let Some(&tf) = self.doc_freqs[doc_idx].get(term_id) {
-                        let tf = tf as f64;
-                        let denom = tf + denom_base[doc_idx];
+        if self.corpus_size > 1000 {
+            // Use chunked parallel processing for better load balancing
+            scores = (0..self.corpus_size)
+                .into_par_iter()
+                .with_min_len(chunk_size)
+                .map(|doc_idx| {
+                    let mut doc_score = 0.0;
 
-                        if denom > 0.0 {
-                            doc_score += idf * (tf * (self.k1 + 1.0) / denom);
+                    // Calculate contribution of each query term to this document
+                    for (term_id, idf) in &query_terms {
+                        if let Some(&tf) = self.doc_freqs[doc_idx].get(term_id) {
+                            let tf = tf as f64;
+                            let denom = tf + denom_base[doc_idx];
+
+                            if denom > 0.0 {
+                                doc_score += idf * (tf * (self.k1 + 1.0) / denom);
+                            }
                         }
                     }
-                }
 
-                doc_score
-            })
-            .collect();
+                    doc_score
+                })
+                .collect();
+        } else {
+            // Use simple parallel processing for smaller corpora
+            scores = (0..self.corpus_size)
+                .into_par_iter()
+                .map(|doc_idx| {
+                    let mut doc_score = 0.0;
+
+                    // Calculate contribution of each query term to this document
+                    for (term_id, idf) in &query_terms {
+                        if let Some(&tf) = self.doc_freqs[doc_idx].get(term_id) {
+                            let tf = tf as f64;
+                            let denom = tf + denom_base[doc_idx];
+
+                            if denom > 0.0 {
+                                doc_score += idf * (tf * (self.k1 + 1.0) / denom);
+                            }
+                        }
+                    }
+
+                    doc_score
+                })
+                .collect();
+        }
 
         scores
     }
@@ -391,14 +592,24 @@ impl BM25 {
             return Vec::new();
         }
 
-        // Filter out documents with zero scores and create (index, score) pairs
-        // This ensures we only return documents that actually match the query
-        let mut non_zero_indices: Vec<(usize, f64)> = scores
-            .iter()
-            .enumerate()
-            .filter(|(_, score)| **score > 0.0)
-            .map(|(idx, score)| (idx, *score))
-            .collect();
+        // Use parallel processing for filtering and sorting large result sets
+        let non_zero_indices: Vec<(usize, f64)> = if n > 10000 {
+            // For very large corpora, use parallel processing
+            scores
+                .par_iter()
+                .enumerate()
+                .filter(|(_, score)| **score > 0.0)
+                .map(|(idx, score)| (idx, *score))
+                .collect()
+        } else {
+            // For smaller corpora, use sequential processing
+            scores
+                .iter()
+                .enumerate()
+                .filter(|(_, score)| **score > 0.0)
+                .map(|(idx, score)| (idx, *score))
+                .collect()
+        };
 
         // If no documents have non-zero scores, return empty result
         if non_zero_indices.is_empty() {
@@ -408,15 +619,44 @@ impl BM25 {
         // Adjust k to not exceed the number of non-zero documents
         let k = k.min(non_zero_indices.len());
 
-        // Sort by score in descending order (highest scores first)
-        non_zero_indices.sort_by(|a, b| b.1.total_cmp(&a.1));
+        // For large result sets, use parallel sorting
+        let sorted_indices = if non_zero_indices.len() > 1000 {
+            // Use parallel sorting for large result sets
+            let mut indices = non_zero_indices;
+            indices.par_sort_by(|a, b| b.1.total_cmp(&a.1));
+            indices
+        } else {
+            // Use sequential sorting for smaller result sets
+            let mut indices = non_zero_indices;
+            indices.sort_by(|a, b| b.1.total_cmp(&a.1));
+            indices
+        };
 
         // Extract and return the top k document indices
-        non_zero_indices
+        sorted_indices
             .into_iter()
             .take(k)
             .map(|(idx, _)| idx)
             .collect()
+    }
+
+    /// Get the current thread configuration
+    fn get_thread_config(&self) -> ThreadConfig {
+        self.thread_config.clone()
+    }
+
+    /// Get performance statistics about the BM25 instance
+    fn get_stats(&self) -> PyResult<Py<PyDict>> {
+        Python::attach(|py| {
+            let stats = PyDict::new(py);
+            stats.set_item("corpus_size", self.corpus_size)?;
+            stats.set_item("avg_document_length", self.avgdl)?;
+            stats.set_item("vocabulary_size", self.idf.len())?;
+            stats.set_item("num_threads", self.thread_config.get_num_threads())?;
+            stats.set_item("k1", self.k1)?;
+            stats.set_item("b", self.b)?;
+            Ok(stats.into())
+        })
     }
 }
 
@@ -444,5 +684,7 @@ impl BM25 {
 fn fastbm25(m: &Bound<PyModule>) -> PyResult<()> {
     // Register the BM25 class with Python
     m.add_class::<BM25>()?;
+    // Register the ThreadConfig class with Python
+    m.add_class::<ThreadConfig>()?;
     Ok(())
 }
