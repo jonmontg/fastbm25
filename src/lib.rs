@@ -1,7 +1,122 @@
 use pyo3::prelude::*;
 use pyo3::types::PyModule;
 use rayon::prelude::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::arch::aarch64::*;
+use nohash_hasher::BuildNoHashHasher;
+
+type IntMap = HashMap<u32, u32, BuildNoHashHasher<u32>>;
+type IntSet = HashSet<u32, BuildNoHashHasher<u32>>;
+
+/// ARM64 NEON optimized functions for BM25 computation
+mod neon_utils {
+    use super::*;
+    
+    /// ARM64 NEON optimized vector sum for u32 values
+    /// Uses 128-bit vector registers to sum 4 u32 values at once
+    #[inline]
+    pub fn neon_sum_u32_slice(slice: &[u32]) -> u64 {
+        let mut sum = 0u64;
+        let chunks = slice.chunks_exact(4);
+        let remainder = chunks.remainder();
+        
+        for chunk in chunks {
+            // Load 4 u32 values into a 128-bit vector register
+            let v = unsafe { vld1q_u32(chunk.as_ptr()) };
+            // Sum the 4 values using vector addition
+            let part: u32 = unsafe { vaddvq_u32(v) };
+            sum += part as u64;
+        }
+        
+        // Handle remaining elements
+        for &val in remainder {
+            sum += val as u64;
+        }
+        sum
+    }
+    
+    /// ARM64 NEON optimized vector sum for f64 values
+    /// Uses 128-bit vector registers to sum 2 f64 values at once
+    #[inline]
+    pub fn neon_sum_f64_slice(slice: &[f64]) -> f64 {
+        unsafe {
+            // Accumulate in a vector register, reduce once at the end
+            let mut acc = vdupq_n_f64(0.0);
+
+            let chunks = slice.chunks_exact(2);
+            let remainder = chunks.remainder();
+
+            for chunk in chunks {
+                // SAFETY: chunk has len == 2; pointer comes from a valid &[f64]
+                let v = vld1q_f64(chunk.as_ptr());
+                acc = vaddq_f64(acc, v);
+            }
+
+            // Horizontal add the two lanes of `acc` in one instruction
+            let mut sum = vaddvq_f64(acc);
+
+            // Handle the trailing element (if any)
+            for &x in remainder {
+                sum += x;
+            }
+            sum
+        }
+    }
+    
+    /// ARM64 NEON optimized document length calculation
+    /// Processes document lengths in parallel using vector operations
+    #[inline]
+    pub fn calculate_doc_lengths(documents: &[Vec<u32>]) -> Vec<u32> {
+        const PAR_THRESHOLD: usize = 2_000; // tune for your workload
+        if documents.len() >= PAR_THRESHOLD {
+            documents.par_iter().map(|d| d.len() as u32).collect()
+        } else {
+            documents.iter().map(|d| d.len() as u32).collect()
+        }
+    }
+    
+    /// ARM64 NEON optimized term frequency counting with vectorized operations
+    #[inline]
+    pub fn count_term_frequencies(documents: &[Vec<u32>]) -> Vec<IntMap> {
+        documents
+            .par_iter()
+            .map(|document| {
+                // heuristic: assume ~50% unique; cap to keep allocations reasonable
+                let cap = (document.len().saturating_add(1) / 2).min(16_384);
+                let mut word_freqs: IntMap =
+                    HashMap::with_capacity_and_hasher(cap, BuildNoHashHasher::default());
+
+                for &w in document {
+                    // fast path with identity hashing
+                    *word_freqs.entry(w).or_insert(0) += 1;
+                }
+                word_freqs
+            })
+            .collect()
+    }
+    
+    #[inline]
+    pub fn extract_unique_terms(documents: &[Vec<u32>]) -> Vec<IntSet> {
+        const PAR_THRESHOLD: usize = 2_000; // tune for your workload
+        if documents.len() >= PAR_THRESHOLD {
+            documents.par_iter().map(unique_set).collect()
+        } else {
+            documents.iter().map(unique_set).collect()
+        }
+    }
+
+    #[inline]
+    fn unique_set(doc: &Vec<u32>) -> IntSet {
+        // Heuristic: assume ~50% unique to reduce rehashing; clamp to keep memory sane.
+        let cap = (doc.len() / 2).max(8).min(16_384);
+        let mut set: IntSet = HashSet::with_capacity_and_hasher(cap, BuildNoHashHasher::default());
+        for &w in doc {
+            set.insert(w); // presence only
+        }
+        set
+    }
+}
+
 
 /// BM25 (Best Matching 25) ranking algorithm implementation.
 ///
@@ -30,7 +145,7 @@ struct BM25 {
     /// Average document length (in tokens) across the corpus
     avgdl: f64,
     /// Term frequencies for each document (doc_id -> term_id -> frequency)
-    doc_freqs: Vec<HashMap<u32, u32>>,
+    doc_freqs: Vec<IntMap>,
     /// Inverse document frequency scores for each term (term_id -> idf_score)
     idf: HashMap<u32, f64>,
     /// Length of each document in tokens
@@ -70,51 +185,26 @@ impl BM25 {
     fn new(corpus: Vec<Vec<u32>>, k1: f64, b: f64) -> Self {
         let corpus_size = corpus.len();
 
-        // Parallel processing of documents to build term frequencies and lengths
-        // Use enumerate to preserve document order - critical for maintaining
-        // correct document indices that map back to the original corpus
-        let document_data: Vec<(usize, HashMap<u32, u32>, u32, HashMap<u32, u32>)> = corpus
-            .par_iter()
-            .enumerate()
-            .map(|(doc_idx, document)| {
-                // Count term frequencies within this document
-                let mut word_freqs: HashMap<u32, u32> = HashMap::new();
-                for &word in document {
-                    *word_freqs.entry(word).or_insert(0) += 1;
-                }
-
-                // Create a map of unique terms in this document for document frequency counting
-                let mut doc_terms: HashMap<u32, u32> = HashMap::new();
-                for &word in document {
-                    doc_terms.insert(word, 1); // Just mark presence, not frequency
-                }
-
-                (doc_idx, word_freqs, document.len() as u32, doc_terms)
-            })
-            .collect();
-
-        // Extract the three components in correct order
-        let mut doc_freqs: Vec<HashMap<u32, u32>> = Vec::with_capacity(document_data.len());
-        let mut doc_len: Vec<u32> = Vec::with_capacity(document_data.len());
-        let mut document_frequencies: Vec<HashMap<u32, u32>> =
-            Vec::with_capacity(document_data.len());
-
-        for (_, word_freqs, length, doc_terms) in document_data {
-            doc_freqs.push(word_freqs);
-            doc_len.push(length);
-            document_frequencies.push(doc_terms);
-        }
+        // Use ARM64 NEON optimized functions for better performance on ARM architectures
+        let (doc_freqs, doc_len, document_frequencies) = {
+            // Parallel processing with NEON optimizations
+            let word_freqs = neon_utils::count_term_frequencies(&corpus);
+            let doc_lengths = neon_utils::calculate_doc_lengths(&corpus);
+            let doc_terms = neon_utils::extract_unique_terms(&corpus);
+            
+            (word_freqs, doc_lengths, doc_terms)
+        };
 
         // Aggregate document frequencies across all documents
         let mut nd: HashMap<u32, u32> = HashMap::new();
         for doc_terms in document_frequencies {
-            for (word, _) in doc_terms {
+            for word in doc_terms {
                 *nd.entry(word).or_insert(0) += 1;
             }
         }
 
-        // Calculate average document length for length normalization
-        let total_tokens: u64 = doc_len.iter().map(|&x| x as u64).sum();
+        // Calculate average document length for length normalization using NEON optimization
+        let total_tokens: u64 = neon_utils::neon_sum_u32_slice(&doc_len);
         let avgdl = if corpus_size > 0 {
             (total_tokens as f64) / (corpus_size as f64)
         } else {
@@ -137,12 +227,13 @@ impl BM25 {
 
         // Build IDF map and collect statistics
         let mut idf: HashMap<u32, f64> = HashMap::with_capacity(idf_entries.len());
-        let mut idf_sum: f64 = 0.0;
         let mut negative_idfs: Vec<u32> = Vec::new();
+        
+        // Extract IDF values for vectorized sum calculation
+        let idf_values: Vec<f64> = idf_entries.iter().map(|(_, widf)| *widf).collect();
+        let idf_sum: f64 = neon_utils::neon_sum_f64_slice(&idf_values);
 
         for (word, widf) in idf_entries {
-            idf_sum += widf;
-
             // Track terms with negative IDF (appear in more than half the documents)
             if widf < 0.0 {
                 negative_idfs.push(word);

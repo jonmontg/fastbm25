@@ -8,5 +8,6 @@ name = "fastbm25"
 crate-type = ["cdylib"]
 
 [dependencies]
+nohash-hasher = "0.2.0"
 pyo3 = { version = "0.26.0", features = ["extension-module"] }
 rayon = "1.8"
